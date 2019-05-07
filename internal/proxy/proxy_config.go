@@ -60,6 +60,7 @@ type UpstreamConfig struct {
 	FlushInterval         time.Duration
 	HeaderOverrides       map[string]string
 	SkipRequestSigning    bool
+	CookieName            string
 }
 
 // RouteConfig maps to the yaml config fields,
@@ -89,6 +90,9 @@ type OptionsConfig struct {
 	ResetDeadline      time.Duration     `yaml:"reset_deadline"`
 	FlushInterval      time.Duration     `yaml:"flush_interval"`
 	SkipRequestSigning bool              `yaml:"skip_request_signing"`
+
+	// set upstream
+	CookieName string
 }
 
 // ErrParsingConfig is an error specific to config parsing.
@@ -390,6 +394,7 @@ func parseOptionsConfig(proxy *UpstreamConfig, defaultOpts *OptionsConfig) error
 	proxy.TLSSkipVerify = dst.TLSSkipVerify
 	proxy.PreserveHost = dst.PreserveHost
 	proxy.SkipRequestSigning = dst.SkipRequestSigning
+	proxy.CookieName = dst.CookieName
 
 	proxy.RouteConfig.Options = nil
 

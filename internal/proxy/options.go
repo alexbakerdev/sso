@@ -192,6 +192,7 @@ func (o *Options) Validate() error {
 			AllowedGroups: o.DefaultAllowedGroups,
 			Timeout:       o.DefaultUpstreamTimeout,
 			ResetDeadline: o.DefaultUpstreamTCPResetDeadline,
+			CookieName:    o.CookieName,
 		}
 
 		o.upstreamConfigs, err = loadServiceConfigs(rawBytes, o.Cluster, o.Scheme, templateVars, defaultUpstreamOptionsConfig)
