@@ -47,7 +47,6 @@ var SignatureHeaders = []string{
 var (
 	ErrLifetimeExpired   = errors.New("user lifetime expired")
 	ErrUserNotAuthorized = errors.New("user not authorized")
-	ErrUnknownHost       = errors.New("unknown host")
 )
 
 const statusInvalidHost = 421
@@ -74,11 +73,90 @@ type OAuthProxy struct {
 	csrfStore    sessions.CSRFStore
 	sessionStore sessions.SessionStore
 
-	mux         map[string]*route
-	regexRoutes []*route
+	upstreamConfig *UpstreamConfig
+	handler        http.Handler
 
 	requestSigner   *RequestSigner
 	publicCertsJSON []byte
+}
+
+// SetCookieStore sets the session and csrf stores as a functional option
+func SetCookieStore(opts *Options) func(*OAuthProxy) error {
+	return func(op *OAuthProxy) error {
+		cookieStore, err := sessions.NewCookieStore(opts.CookieName,
+			sessions.CreateMiscreantCookieCipher(opts.decodedCookieSecret),
+			func(c *sessions.CookieStore) error {
+				c.CookieDomain = opts.CookieDomain
+				c.CookieHTTPOnly = opts.CookieHTTPOnly
+				c.CookieExpire = opts.CookieExpire
+				c.CookieSecure = opts.CookieSecure
+				return nil
+			})
+
+		if err != nil {
+			return err
+		}
+
+		op.csrfStore = cookieStore
+		op.sessionStore = cookieStore
+		op.CookieCipher = cookieStore.CookieCipher
+		return nil
+	}
+}
+
+// SetRequestSigner sets the request signer  as a functional option
+// SetRequestSigner sets a request signer
+func SetRequestSigner(signer *RequestSigner) func(*OAuthProxy) error {
+	logger := log.NewLogEntry()
+	return func(op *OAuthProxy) error {
+		if signer == nil {
+			logger.Warn("Running OAuthProxy without signing key. Requests will not be signed.")
+			return nil
+		}
+
+		// Configure the RequestSigner (used to sign requests with `Sso-Signature` header).
+		// Also build the `certs` static JSON-string which will be served from a public endpoint.
+		// The key published at this endpoint allows upstreams to decrypt the `Sso-Signature`
+		// header, and validate the integrity and authenticity of a request.
+
+		certs := make(map[string]string)
+		id, key := signer.PublicKey()
+		certs[id] = key
+
+		certsAsStr, err := json.MarshalIndent(certs, "", "  ")
+		if err != nil {
+			return fmt.Errorf("could not marshal public certs as JSON: %s", err)
+		}
+
+		op.requestSigner = signer
+		op.publicCertsJSON = certsAsStr
+
+		return nil
+	}
+}
+
+// SetUpstreamConfig sets the upstream config as a functional option
+func SetUpstreamConfig(upstreamConfig *UpstreamConfig) func(*OAuthProxy) error {
+	return func(op *OAuthProxy) error {
+		op.upstreamConfig = upstreamConfig
+		return nil
+	}
+}
+
+// SetProxyHandler sets the proxy handler as a functional option
+func SetProxyHandler(handler http.Handler) func(*OAuthProxy) error {
+	return func(op *OAuthProxy) error {
+		op.handler = handler
+		return nil
+	}
+}
+
+// SetValidator sets the email validator as a functional option
+func SetValidator(validator func(string) bool) func(*OAuthProxy) error {
+	return func(op *OAuthProxy) error {
+		op.EmailValidator = validator
+		return nil
+	}
 }
 
 type route struct {
@@ -256,20 +334,22 @@ func NewRewriteReverseProxy(route *RewriteRoute, config *UpstreamConfig) *httput
 // NewReverseProxyHandler creates a new http.Handler given a httputil.ReverseProxy
 func NewReverseProxyHandler(reverseProxy *httputil.ReverseProxy, opts *Options, config *UpstreamConfig, signer *RequestSigner) (http.Handler, []string) {
 	upstreamProxy := &UpstreamProxy{
-		name:          config.Service,
-		handler:       reverseProxy,
-		auth:          config.HMACAuth,
-		cookieName:    opts.CookieName,
-		statsdClient:  opts.StatsdClient,
-		requestSigner: signer,
+		name:         config.Service,
+		handler:      reverseProxy,
+		auth:         config.HMACAuth,
+		cookieName:   opts.CookieName,
+		statsdClient: opts.StatsdClient,
 	}
-	if config.SkipRequestSigning {
-		upstreamProxy.requestSigner = nil
+	if !config.SkipRequestSigning {
+		upstreamProxy.requestSigner = signer
 	}
 	if config.FlushInterval != 0 {
 		return NewStreamingHandler(upstreamProxy, opts, config), []string{"handler:streaming"}
 	}
-	return NewTimeoutHandler(upstreamProxy, config), []string{"handler:timeout"}
+	if config.Timeout != 0 {
+		return NewTimeoutHandler(upstreamProxy, config), []string{"handler:timeout"}
+	}
+	return upstreamProxy, []string{"handler:basic"}
 }
 
 // NewTimeoutHandler creates a new handler with a configure timeout.
@@ -303,81 +383,28 @@ func generateHmacAuth(signatureKey string) (hmacauth.HmacAuth, error) {
 
 // NewOAuthProxy creates a new OAuthProxy struct.
 func NewOAuthProxy(opts *Options, optFuncs ...func(*OAuthProxy) error) (*OAuthProxy, error) {
-	logger := log.NewLogEntry()
-	logger.WithProvider(opts.provider.Data().ProviderName).WithClientID(opts.ClientID).Info(
-		"OAuthProxy configured")
-	domain := opts.CookieDomain
-	if domain == "" {
-		domain = "<default>"
-	}
-
 	// we setup a runtime collector to emit stats to datadog
 	go func() {
 		c := collector.New(opts.StatsdClient, 30*time.Second)
 		c.Run()
 	}()
 
-	// Configure the RequestSigner (used to sign requests with `Sso-Signature` header).
-	// Also build the `certs` static JSON-string which will be served from a public endpoint.
-	// The key published at this endpoint allows upstreams to decrypt the `Sso-Signature`
-	// header, and validate the integrity and authenticity of a request.
-	certs := make(map[string]string)
-	var requestSigner *RequestSigner
-	var err error
-	if len(opts.RequestSigningKey) > 0 {
-		if requestSigner, err = NewRequestSigner(opts.RequestSigningKey); err != nil {
-			return nil, fmt.Errorf("could not build RequestSigner: %s", err)
-		}
-		id, key := requestSigner.PublicKey()
-		certs[id] = key
-	} else {
-		logger.Warn("Running OAuthProxy without signing key. Requests will not be signed.")
-	}
-	certsAsStr, err := json.MarshalIndent(certs, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("could not marshal public certs as JSON: %s", err)
-	}
-
 	p := &OAuthProxy{
-
 		CookieSecure: opts.CookieSecure,
 		StatsdClient: opts.StatsdClient,
 
-		// these fields make up the routing mechanism
-		mux:         make(map[string]*route),
-		regexRoutes: make([]*route, 0),
-
-		provider:          opts.provider,
 		redirectURL:       &url.URL{Path: "/oauth2/callback"},
 		skipAuthPreflight: opts.SkipAuthPreflight,
 		templates:         getTemplates(),
 		PassAccessToken:   opts.PassAccessToken,
 
-		requestSigner:   requestSigner,
-		publicCertsJSON: certsAsStr,
+		upstreamConfig: &UpstreamConfig{},
 	}
 
 	for _, optFunc := range optFuncs {
 		err := optFunc(p)
 		if err != nil {
 			return nil, err
-		}
-	}
-
-	for _, upstreamConfig := range opts.upstreamConfigs {
-		switch route := upstreamConfig.Route.(type) {
-		case *SimpleRoute:
-			reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
-			handler, tags := NewReverseProxyHandler(
-				reverseProxy, opts, upstreamConfig, requestSigner)
-			p.Handle(route.FromURL.Host, handler, tags, upstreamConfig)
-		case *RewriteRoute:
-			reverseProxy := NewRewriteReverseProxy(route, upstreamConfig)
-			handler, tags := NewReverseProxyHandler(
-				reverseProxy, opts, upstreamConfig, requestSigner)
-			p.HandleRegex(route.FromRegex, handler, tags, upstreamConfig)
-		default:
-			return nil, fmt.Errorf("unknown route type")
 		}
 	}
 
@@ -402,61 +429,10 @@ func (p *OAuthProxy) Handler() http.Handler {
 	if p.CookieSecure {
 		handler = requireHTTPS(handler)
 	}
-	handler = p.setResponseHeaderOverrides(handler)
+	handler = p.setResponseHeaderOverrides(p.upstreamConfig, handler)
 	handler = setSecurityHeaders(handler)
-	handler = p.validateHost(handler)
 
-	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		// Skip host validation for /ping requests because they hit the LB directly.
-		if req.URL.Path == "/ping" {
-			p.PingPage(rw, req)
-			return
-		}
-		handler.ServeHTTP(rw, req)
-	})
-}
-
-// UnknownHost returns an http error for unknown or invalid hosts
-func (p *OAuthProxy) UnknownHost(rw http.ResponseWriter, req *http.Request) {
-	logger := log.NewLogEntry()
-
-	tags := []string{
-		fmt.Sprintf("action:%s", GetActionTag(req)),
-		"error:unknown_host",
-	}
-	p.StatsdClient.Incr("application_error", tags, 1.0)
-	logger.WithRequestHost(req.Host).Error("unknown host")
-	http.Error(rw, "", statusInvalidHost)
-}
-
-// Handle constructs a route from the given host string and matches it to the provided http.Handler and UpstreamConfig
-func (p *OAuthProxy) Handle(host string, handler http.Handler, tags []string, upstreamConfig *UpstreamConfig) {
-	tags = append(tags, "route:simple")
-	p.mux[host] = &route{handler: handler, upstreamConfig: upstreamConfig, tags: tags}
-}
-
-// HandleRegex constructs a route from the given regexp and matches it to the provided http.Handler and UpstreamConfig
-func (p *OAuthProxy) HandleRegex(regex *regexp.Regexp, handler http.Handler, tags []string, upstreamConfig *UpstreamConfig) {
-	tags = append(tags, "route:rewrite")
-	p.regexRoutes = append(p.regexRoutes, &route{regex: regex, handler: handler, upstreamConfig: upstreamConfig, tags: tags})
-}
-
-// router attempts to find a route for a equest. If a route is successfully matched,
-// it returns the route information and a bool value of `true`. If a route can not be matched,
-//a nil value for the route and false bool value is returned.
-func (p *OAuthProxy) router(req *http.Request) (*route, bool) {
-	route, ok := p.mux[req.Host]
-	if ok {
-		return route, true
-	}
-
-	for _, route := range p.regexRoutes {
-		if route.regex.MatchString(req.Host) {
-			return route, true
-		}
-	}
-
-	return nil, false
+	return handler
 }
 
 // GetRedirectURL returns the redirect url for a given OAuthProxy,
@@ -519,12 +495,6 @@ func (p *OAuthProxy) Favicon(rw http.ResponseWriter, req *http.Request) {
 	p.Proxy(rw, req)
 }
 
-// PingPage send back a 200 OK response.
-func (p *OAuthProxy) PingPage(rw http.ResponseWriter, _ *http.Request) {
-	rw.WriteHeader(http.StatusOK)
-	fmt.Fprintf(rw, "OK")
-}
-
 // XHRError returns a simple error response with an error message to the application if the request is an XML request
 func (p *OAuthProxy) XHRError(rw http.ResponseWriter, req *http.Request, code int, err error) {
 	remoteAddr := getRemoteAddr(req)
@@ -579,14 +549,7 @@ func (p *OAuthProxy) IsWhitelistedRequest(req *http.Request) bool {
 		return true
 	}
 
-	route, ok := p.router(req)
-	if !ok {
-		// This proxy host doesn't exist, so not allowed
-		return false
-	}
-
-	upstreamConfig := route.upstreamConfig
-	for _, re := range upstreamConfig.SkipAuthCompiledRegex {
+	for _, re := range p.upstreamConfig.SkipAuthCompiledRegex {
 		if re.MatchString(req.URL.Path) {
 			// This upstream has a matching skip auth regex
 			return true
@@ -798,17 +761,7 @@ func (p *OAuthProxy) OAuthCallback(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	route, ok := p.router(req)
-	if !ok {
-		// this shouldn't happen since we've already matched the host once on this request
-		tags = append(tags, "error:unknown_host")
-		p.StatsdClient.Incr("application_error", tags, 1.0)
-		logger.WithRemoteAddress(remoteAddr).WithUser(session.Email).Info(
-			"couldn't resolve route from host name for membership check")
-		p.ErrorPage(rw, req, http.StatusInternalServerError, "Internal Error", "Error looking up route for group membership")
-		return
-	}
-	allowedGroups := route.upstreamConfig.AllowedGroups
+	allowedGroups := p.upstreamConfig.AllowedGroups
 
 	inGroups, validGroup, err := p.provider.ValidateGroup(session.Email, allowedGroups, session.AccessToken)
 	if err != nil {
@@ -912,20 +865,10 @@ func (p *OAuthProxy) Proxy(rw http.ResponseWriter, req *http.Request) {
 		}
 	}
 
-	// We have validated the users request and now proxy their request to the provided upstream.
-	route, ok := p.router(req)
-	if !ok {
-		p.UnknownHost(rw, req)
-		return
-	}
-	if route.tags != nil {
-		tags = append(tags, route.tags...)
-	}
-
 	overhead := time.Now().Sub(start)
 	p.StatsdClient.Timing("request_overhead", overhead, tags, 1.0)
 
-	route.handler.ServeHTTP(rw, req)
+	p.handler.ServeHTTP(rw, req)
 }
 
 // Authenticate authenticates a request by checking for a session cookie, and validating its expiration,
@@ -933,13 +876,7 @@ func (p *OAuthProxy) Proxy(rw http.ResponseWriter, req *http.Request) {
 func (p *OAuthProxy) Authenticate(rw http.ResponseWriter, req *http.Request) (err error) {
 	logger := log.NewLogEntry().WithRemoteAddress(getRemoteAddr(req))
 
-	route, ok := p.router(req)
-	if !ok {
-		logger.WithRequestHost(req.Host).Info(
-			"error looking up route by host to validate user groups")
-		return ErrUnknownHost
-	}
-	allowedGroups := route.upstreamConfig.AllowedGroups
+	allowedGroups := p.upstreamConfig.AllowedGroups
 
 	// Clear the session cookie if anything goes wrong.
 	defer func() {

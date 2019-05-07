@@ -28,24 +28,10 @@ func setSecurityHeaders(h http.Handler) http.Handler {
 	})
 }
 
-func (p *OAuthProxy) setResponseHeaderOverrides(h http.Handler) http.Handler {
+func (p *OAuthProxy) setResponseHeaderOverrides(upstreamConfig *UpstreamConfig, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		route, ok := p.router(req)
-		if ok && route.upstreamConfig.HeaderOverrides != nil {
-			for key, val := range route.upstreamConfig.HeaderOverrides {
-				rw.Header().Set(key, val)
-			}
-		}
-		h.ServeHTTP(rw, req)
-	})
-}
-
-// validateHost ensures that each request's host is valid
-func (p *OAuthProxy) validateHost(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		if _, ok := p.router(req); !ok {
-			p.UnknownHost(rw, req)
-			return
+		for key, val := range upstreamConfig.HeaderOverrides {
+			rw.Header().Set(key, val)
 		}
 		h.ServeHTTP(rw, req)
 	})
