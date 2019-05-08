@@ -53,3 +53,13 @@ func requireHTTPS(h http.Handler) http.Handler {
 		h.ServeHTTP(rw, req)
 	})
 }
+
+func setHealthCheck(healthcheckPath string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == healthcheckPath {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

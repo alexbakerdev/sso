@@ -7,7 +7,6 @@ import (
 
 	"github.com/buzzfeed/sso/internal/pkg/hostmux"
 	"github.com/buzzfeed/sso/internal/pkg/options"
-	"github.com/buzzfeed/sso/internal/pkg/ping"
 )
 
 type SSOProxy struct {
@@ -68,12 +67,9 @@ func New(opts *Options) (*SSOProxy, error) {
 		}
 	}
 
-	// ping handler
-	pingHandler := &ping.PingHandler{
-		Handler: hostRouter,
-	}
+	healthcheckHandler := setHealthCheck("/ping", hostRouter)
 
 	return &SSOProxy{
-		pingHandler,
+		healthcheckHandler,
 	}, nil
 }
