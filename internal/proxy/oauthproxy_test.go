@@ -113,13 +113,13 @@ func testHTTPBin(t *testing.T) (*url.URL, func()) {
 	h := httpbin.NewHTTPBin()
 
 	backend := httptest.NewServer(h.Handler())
-	b, err := url.Parse(backend.URL)
+	backendURL, err := url.Parse(backend.URL)
 	testutil.Assert(t, err == nil, "could not parse ural from httptest server: %v", err)
-	return b, backend.Close
+	return backendURL, backend.Close
 }
 
 func testNewOAuthProxy(t *testing.T, optFuncs ...func(*OAuthProxy) error) (*OAuthProxy, func()) {
-	b, close := testHTTPBin(t)
+	backendURL, close := testHTTPBin(t)
 
 	opts := NewOptions()
 	providerURL, _ := url.Parse("http://localhost/")
@@ -141,15 +141,14 @@ func testNewOAuthProxy(t *testing.T, optFuncs ...func(*OAuthProxy) error) (*OAut
 
 	session := testSession()
 
-	route := &SimpleRoute{
-		ToURL: b,
-	}
 	upstreamConfig := &UpstreamConfig{
-		Route:         route,
+		Route: &SimpleRoute{
+			ToURL: backendURL,
+		},
 		AllowedGroups: session.Groups,
 	}
 
-	reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
+	reverseProxy := NewReverseProxy(backendURL, upstreamConfig)
 	handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, requestSigner)
 
 	if requestSigner == nil {
@@ -588,15 +587,29 @@ func TestEncodedSlashes(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	b, _ := url.Parse(backend.URL)
-	proxyHandler := NewReverseProxy(b, &UpstreamConfig{TLSSkipVerify: false, PreserveHost: false})
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("unexpected err parsing backend url: %v", err)
+	}
+	proxyHandler := NewReverseProxy(backendURL, &UpstreamConfig{TLSSkipVerify: false, PreserveHost: false})
 	frontend := httptest.NewServer(proxyHandler)
 	defer frontend.Close()
 
-	f, _ := url.Parse(frontend.URL)
+	frontendURL, err := url.Parse(frontend.URL)
+	if err != nil {
+		t.Fatalf("unexpected err parsing frontend url: %v", err)
+	}
+
 	encodedPath := "/a%2Fb/?c=1"
-	getReq := &http.Request{URL: &url.URL{Scheme: "http", Host: f.Host, Opaque: encodedPath}}
-	_, err := http.DefaultClient.Do(getReq)
+	getReq := &http.Request{
+		URL: &url.URL{
+			Scheme: "http",
+			Host:   frontendURL.Host,
+			Opaque: encodedPath,
+		},
+	}
+
+	_, err = http.DefaultClient.Do(getReq)
 	if err != nil {
 		t.Fatalf("err %s", err)
 	}
@@ -1359,18 +1372,15 @@ func TestSecurityHeaders(t *testing.T) {
 				w.Write([]byte(r.URL.RequestURI()))
 			}))
 			defer backend.Close()
-			b, _ := url.Parse(backend.URL)
+			backendURL, err := url.Parse(backend.URL)
+			if err != nil {
+				t.Fatalf("unexpected err parsing backend url: %v", err)
+			}
 
-			config := &UpstreamConfig{
-				Route: &SimpleRoute{
-					ToURL: b,
-				},
-			}
-			route := &SimpleRoute{
-				ToURL: b,
-			}
 			upstreamConfig := &UpstreamConfig{
-				Route: route,
+				Route: &SimpleRoute{
+					ToURL: backendURL,
+				},
 			}
 			opts := NewOptions()
 
@@ -1386,7 +1396,7 @@ func TestSecurityHeaders(t *testing.T) {
 			// * If we just specified this beahvior in sso proxy w/out deleting headers,
 			//   we wouldn't be able to override the headers as they sent upstream, we'd just
 			//   send multiple headers
-			reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
+			reverseProxy := NewReverseProxy(backendURL, upstreamConfig)
 			handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, nil)
 
 			sessionStore := &sessions.MockSessionStore{}
@@ -1395,7 +1405,7 @@ func TestSecurityHeaders(t *testing.T) {
 			}
 			proxy, close := testNewOAuthProxy(t,
 				setSessionStore(sessionStore),
-				SetUpstreamConfig(config),
+				SetUpstreamConfig(upstreamConfig),
 				SetProxyHandler(handler),
 			)
 			defer close()
