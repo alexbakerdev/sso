@@ -47,7 +47,7 @@ func main() {
 		Addr:         fmt.Sprintf(":%d", opts.Port),
 		ReadTimeout:  opts.TCPReadTimeout,
 		WriteTimeout: opts.TCPWriteTimeout,
-		Handler:      ssoProxy,
+		Handler:      loggingHandler,
 	}
 
 	logger.Fatal(s.ListenAndServe())

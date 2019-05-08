@@ -146,7 +146,7 @@ func testNewOAuthProxy(t *testing.T, optFuncs ...func(*OAuthProxy) error) (*OAut
 	}
 
 	reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
-	handler, _ := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, requestSigner)
+	handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, requestSigner)
 
 	if requestSigner == nil {
 		t.Fatalf("request signer is nil")
@@ -866,7 +866,7 @@ func TestSecurityHeaders(t *testing.T) {
 
 			opts := NewOptions()
 			reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
-			handler, _ := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, nil)
+			handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, nil)
 
 			sessionStore := &sessions.MockSessionStore{}
 			if tc.authenticated {

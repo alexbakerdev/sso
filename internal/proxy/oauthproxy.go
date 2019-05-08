@@ -332,7 +332,7 @@ func NewRewriteReverseProxy(route *RewriteRoute, config *UpstreamConfig) *httput
 }
 
 // NewReverseProxyHandler creates a new http.Handler given a httputil.ReverseProxy
-func NewReverseProxyHandler(reverseProxy *httputil.ReverseProxy, opts *Options, config *UpstreamConfig, signer *RequestSigner) (http.Handler, []string) {
+func NewReverseProxyHandler(reverseProxy *httputil.ReverseProxy, opts *Options, config *UpstreamConfig, signer *RequestSigner) http.Handler {
 	upstreamProxy := &UpstreamProxy{
 		name:         config.Service,
 		handler:      reverseProxy,
@@ -344,12 +344,13 @@ func NewReverseProxyHandler(reverseProxy *httputil.ReverseProxy, opts *Options, 
 		upstreamProxy.requestSigner = signer
 	}
 	if config.FlushInterval != 0 {
-		return NewStreamingHandler(upstreamProxy, opts, config), []string{"handler:streaming"}
+		return NewStreamingHandler(upstreamProxy, opts, config)
 	}
 	if config.Timeout != 0 {
-		return NewTimeoutHandler(upstreamProxy, config), []string{"handler:timeout"}
+		return NewTimeoutHandler(upstreamProxy, config)
 	}
-	return upstreamProxy, []string{"handler:basic"}
+
+	return upstreamProxy
 }
 
 // NewTimeoutHandler creates a new handler with a configure timeout.

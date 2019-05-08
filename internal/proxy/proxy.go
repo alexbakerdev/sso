@@ -3,7 +3,7 @@ package proxy
 import (
 	"fmt"
 	"net/http"
-	"os"
+	"net/http/httputil"
 
 	"github.com/buzzfeed/sso/internal/pkg/hostmux"
 	"github.com/buzzfeed/sso/internal/pkg/options"
@@ -35,19 +35,17 @@ func New(opts *Options) (*SSOProxy, error) {
 
 	hostRouter := hostmux.NewRouter()
 	for _, upstreamConfig := range opts.upstreamConfigs {
-		var handler http.Handler
+		var reverseProxy *httputil.ReverseProxy
+
 		switch route := upstreamConfig.Route.(type) {
 		case *SimpleRoute:
-			reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
-			handler, _ = NewReverseProxyHandler(
-				reverseProxy, opts, upstreamConfig, requestSigner)
+			reverseProxy = NewReverseProxy(route.ToURL, upstreamConfig)
 		case *RewriteRoute:
-			reverseProxy := NewRewriteReverseProxy(route, upstreamConfig)
-			handler, _ = NewReverseProxyHandler(
-				reverseProxy, opts, upstreamConfig, requestSigner)
+			reverseProxy = NewRewriteReverseProxy(route, upstreamConfig)
 		default:
 			return nil, fmt.Errorf("unknown route type")
 		}
+		handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, requestSigner)
 
 		optFuncs = append(optFuncs,
 			SetCookieStore(opts),
