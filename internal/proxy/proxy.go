@@ -75,10 +75,7 @@ func New(opts *Options) (*SSOProxy, error) {
 		Handler: hostRouter,
 	}
 
-	// logging handler
-	loggingHandler := NewLoggingHandler(os.Stdout, pingHandler, opts.RequestLogging, opts.StatsdClient)
-
 	return &SSOProxy{
-		loggingHandler,
+		pingHandler,
 	}, nil
 }

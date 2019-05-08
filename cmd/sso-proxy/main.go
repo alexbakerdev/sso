@@ -31,17 +31,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	SSOProxy, err := proxy.New(opts)
+	ssoProxy, err := proxy.New(opts)
 	if err != nil {
 		logger.Error(err, "error creating sso proxy")
 		os.Exit(1)
 	}
 
+	loggingHandler := proxy.NewLoggingHandler(os.Stdout,
+		ssoProxy,
+		opts.RequestLogging,
+		opts.StatsdClient,
+	)
+
 	s := &http.Server{
 		Addr:         fmt.Sprintf(":%d", opts.Port),
 		ReadTimeout:  opts.TCPReadTimeout,
 		WriteTimeout: opts.TCPWriteTimeout,
-		Handler:      SSOProxy,
+		Handler:      ssoProxy,
 	}
 
 	logger.Fatal(s.ListenAndServe())
