@@ -23,14 +23,16 @@ func misdirected(rw http.ResponseWriter, req *http.Request) {
 type Router struct {
 	mu sync.Mutex
 
-	// StaticRoutes stores a map from hosts to static routes and matches host i.e. http.Request.Host
-	// Should be used primarly through Router.HandleStatic
+	// StaticRoutes have the highest precedence, and match keys to http.Request.Host values exactly.
+	// Added to a router by HandleStatic().
 	StaticRoutes map[string]*StaticRoute
-	// RegexpRoutes stores a list of regexp routes to match hosts i.e. http.Request.Host based on a regex.
-	// Should be used primarly through Router.HandleRexep
+
+	// RegexpRoutes match http.Request.Host based on regular expressions, if no exact match is found.
+	// Added to a router by HandleRegexp().
 	RegexpRoutes []*RegexpRoute
-	// DefaultRoute matches if no other route is matched.
-	// should be used primarly through Router.HandleDefault
+
+	// DefaultRoute matches any remaining requests.
+	//Added by HandleDefault()
 	DefaultRoute *DefaultRoute
 }
 
