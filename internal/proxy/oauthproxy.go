@@ -247,6 +247,19 @@ func (t *upstreamTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		logger.Error(err, "error in upstreamTransport RoundTrip")
 		return nil, err
 	}
+
+	// NOTE: This logic for this feature is spread out in various parts of the
+	// request lifecycle. We require *our* special reverse proxy to delete the security
+	// headers, if any specified by he upstream *before* we set them on our response.
+	//
+	// We do this to ensure *every* response, either originating from the upstream or
+	// from the sso proxy itself contains these security headers.
+	//
+	// * If we just specified this behavior in the reverse proxy itself, responses
+	//   that originate from the sso proxy would not have security headers.
+	// * If we just specified this beahvior in sso proxy w/out deleting headers,
+	//   we wouldn't be able to override the headers as they sent upstream, we'd just
+	//   send multiple headers
 	for key := range securityHeaders {
 		resp.Header.Del(key)
 	}

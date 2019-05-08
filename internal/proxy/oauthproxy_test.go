@@ -854,17 +854,26 @@ func TestSecurityHeaders(t *testing.T) {
 					ToURL: b,
 				},
 			}
-
-			// DRAGONS: this requires special reverse proxy behavior to delete the security headers
-			// passed by the response object before we set them on the response writer object :/
 			route := &SimpleRoute{
 				ToURL: b,
 			}
 			upstreamConfig := &UpstreamConfig{
 				Route: route,
 			}
-
 			opts := NewOptions()
+
+			// NOTE: This logic particularly hard to test as it requires *our* special reverse proxy
+			// to behavior to delete the security headers passed by the upstream *before* we set
+			// them on our response.
+			//
+			// We do this to ensure *every* response, either originating from the upstream or
+			// from the sso proxy itself contains these security headers.
+			//
+			// * If we just specified this behavior in the reverse proxy itself, responses
+			//   that originate from the sso proxy would not have security headers.
+			// * If we just specified this beahvior in sso proxy w/out deleting headers,
+			//   we wouldn't be able to override the headers as they sent upstream, we'd just
+			//   send multiple headers
 			reverseProxy := NewReverseProxy(route.ToURL, upstreamConfig)
 			handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, nil)
 
