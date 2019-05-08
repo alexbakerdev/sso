@@ -865,17 +865,25 @@ func TestHMACSignatures(t *testing.T) {
 			proxy, close := testNewOAuthProxy(t,
 				SetUpstreamConfig(upstreamConfig),
 				SetProxyHandler(handler),
+				setCookieSecure(false),
 			)
 			defer close()
 
-			rw := httptest.NewRecorder()
-			req := httptest.NewRequest(tc.method, "https://localhost/", tc.body)
-			req.ContentLength = -1
+			proxyServer := httptest.NewServer(proxy.Handler())
+			defer proxyServer.Close()
 
-			proxy.Handler().ServeHTTP(rw, req)
+			req, err := http.NewRequest(tc.method, proxyServer.URL, tc.body)
+			if err != nil {
+				t.Fatalf("got unexpected error creating http request: %v", err)
+			}
 
-			if rw.Code != http.StatusOK {
-				t.Logf("have: %v", rw.Code)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("got unexpected error doing http request: %v", err)
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				t.Logf("have: %v", resp.StatusCode)
 				t.Logf("want: %v", http.StatusOK)
 				t.Fatalf("got unexpected status code")
 			}
