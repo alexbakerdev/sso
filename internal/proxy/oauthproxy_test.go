@@ -1,11 +1,14 @@
 package proxy
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -17,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/18F/hmacauth"
 	"github.com/mccutchen/go-httpbin/httpbin"
 
 	"github.com/buzzfeed/sso/internal/pkg/aead"
@@ -780,146 +784,90 @@ func TestSkipAuthRequest(t *testing.T) {
 	}
 }
 
-type SignatureAuthenticator struct {
-	auth hmacauth.HmacAuth
-}
-
-func (v *SignatureAuthenticator) Authenticate(w http.ResponseWriter, r *http.Request) {
-	result, headerSig, computedSig := v.auth.AuthenticateRequest(r)
-	if result == hmacauth.ResultNoSignature {
-		w.Write([]byte("no signature received"))
-	} else if result == hmacauth.ResultMatch {
-		w.Write([]byte("signatures match"))
-	} else if result == hmacauth.ResultMismatch {
-		w.Write([]byte("signatures do not match:" +
-			"\n  received: " + headerSig +
-			"\n  computed: " + computedSig))
-	} else {
-		panic("Unknown result value: " + result.String())
+func TestHMACSignatures(t *testing.T) {
+	testCases := map[string]struct {
+		signatureKey string
+		method       string
+		body         io.Reader
+		signer       hmacauth.HmacAuth
+	}{
+		"Test Get Request": {
+			signatureKey: "sha1:foobar",
+			method:       "GET",
+			signer: hmacauth.NewHmacAuth(crypto.SHA1,
+				[]byte(`foobar`),
+				HMACSignatureHeader,
+				SignatureHeaders,
+			),
+		},
+		"Test POST Request": {
+			signatureKey: "sha1:foobar",
+			method:       "POST",
+			body:         bytes.NewBufferString(`{ "hello": "world!" }`),
+			signer: hmacauth.NewHmacAuth(crypto.SHA1,
+				[]byte(`foobar`),
+				HMACSignatureHeader,
+				SignatureHeaders,
+			),
+		},
 	}
-}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// this signer acts as an upstream attempting to authenticate the request
+				result, have, want := tc.signer.AuthenticateRequest(r)
+				switch result {
+				case hmacauth.ResultNoSignature:
+					t.Fatalf("no signature received: %v", result)
+				case hmacauth.ResultMismatch:
+					t.Logf("have: %v", have)
+					t.Logf("want: %v", want)
+					t.Fatalf("expected hmac signature to match")
+				case hmacauth.ResultMatch:
+					break
+				default:
+					t.Fatalf("unexpected result: %v", result)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+			upstreamURL, err := url.Parse(upstream.URL)
+			if err != nil {
+				t.Fatalf("unexpected err parsing upstream url: %v", err)
+			}
 
-type SignatureTest struct {
-	opts          *Options
-	upstream      *httptest.Server
-	upstreamHost  string
-	provider      *httptest.Server
-	header        http.Header
-	rw            *httptest.ResponseRecorder
-	authenticator *SignatureAuthenticator
-}
+			hmacSigner, err := generateHmacAuth(tc.signatureKey)
+			if err != nil {
+				t.Fatalf("unexpected err creating hmac auth: %v", err)
+			}
 
-func generateSignatureTestUpstreamConfigs(key, to string) []*UpstreamConfig {
+			upstreamConfig := &UpstreamConfig{
+				HMACAuth: hmacSigner,
+			}
 
-	if !strings.Contains(to, "://") {
-		to = fmt.Sprintf("%s://%s", "http", to)
+			opts := NewOptions()
+			reverseProxy := NewReverseProxy(upstreamURL, upstreamConfig)
+			handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, nil)
+
+			proxy, close := testNewOAuthProxy(t,
+				SetUpstreamConfig(upstreamConfig),
+				SetProxyHandler(handler),
+			)
+			defer close()
+
+			rw := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, "https://localhost/", tc.body)
+			req.ContentLength = -1
+
+			proxy.Handler().ServeHTTP(rw, req)
+
+			if rw.Code != http.StatusOK {
+				t.Logf("have: %v", rw.Code)
+				t.Logf("want: %v", http.StatusOK)
+				t.Fatalf("got unexpected status code")
+			}
+		})
 	}
-	parsed, err := url.Parse(to)
-	if err != nil {
-		panic(err)
-	}
-	templateVars := map[string]string{
-		"root_domain":     "dev",
-		"cluster":         "sso",
-		"foo_signing_key": key,
-	}
-	defaultUpstreamOpts := &OptionsConfig{Timeout: time.Duration(1) * time.Second}
-	upstreamConfigs, err := loadServiceConfigs([]byte(fmt.Sprintf(`
-- service: foo
-  default:
-    from: foo.{{cluster}}.{{root_domain}}
-    to: %s
-`, parsed)), "sso", "http", templateVars, defaultUpstreamOpts)
-	if err != nil {
-		panic(err)
-	}
-
-	return upstreamConfigs
-}
-
-func NewSignatureTest(key string) *SignatureTest {
-	opts := NewOptions()
-	opts.CookieSecret = testEncodedCookieSecret
-	opts.ClientID = "client ID"
-	opts.ClientSecret = "client secret"
-	opts.EmailDomains = []string{"example.com"}
-
-	authenticator := &SignatureAuthenticator{}
-	upstream := httptest.NewServer(
-		http.HandlerFunc(authenticator.Authenticate))
-	upstreamURL, _ := url.Parse(upstream.URL)
-
-	providerHandler := func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"access_token": "my_auth_token"}`))
-	}
-	provider := httptest.NewServer(http.HandlerFunc(providerHandler))
-	providerURL, _ := url.Parse(provider.URL)
-	opts.provider = providers.NewTestProvider(providerURL, "email1@example.com")
-	opts.upstreamConfigs = generateSignatureTestUpstreamConfigs(key, upstream.URL)
-	opts.Validate()
-
-	return &SignatureTest{
-		opts,
-		upstream,
-		upstreamURL.Host,
-		provider,
-		make(http.Header),
-		httptest.NewRecorder(),
-		authenticator,
-	}
-}
-
-func (st *SignatureTest) Close() {
-	st.provider.Close()
-	st.upstream.Close()
-}
-
-// fakeNetConn simulates an http.Request.Body buffer that will be consumed
-// when it is read by the hmacauth.HmacAuth if not handled properly. See:
-//   https://github.com/18F/hmacauth/pull/4
-type fakeNetConn struct {
-	reqBody string
-}
-
-func (fnc *fakeNetConn) Read(p []byte) (n int, err error) {
-	if bodyLen := len(fnc.reqBody); bodyLen != 0 {
-		copy(p, fnc.reqBody)
-		fnc.reqBody = ""
-		return bodyLen, io.EOF
-	}
-	return 0, io.EOF
-}
-
-func (st *SignatureTest) MakeRequestWithExpectedKey(method, body, key string) {
-	proxy, _ := NewOAuthProxy(st.opts, testValidatorFunc(true), setSessionStore(&sessions.MockSessionStore{Session: testSession()}))
-	var bodyBuf io.ReadCloser
-	if body != "" {
-		bodyBuf = ioutil.NopCloser(&fakeNetConn{reqBody: body})
-	}
-	req := httptest.NewRequest(method, "https://foo.sso.dev/foo/bar", bodyBuf)
-	req.Header = st.header
-
-	// This is used by the upstream to validate the signature.
-	st.authenticator.auth = hmacauth.NewHmacAuth(
-		crypto.SHA1, []byte(key), HMACSignatureHeader, SignatureHeaders)
-	proxy.Handler().ServeHTTP(st.rw, req)
-}
-
-func TestRequestSignatureGetRequest(t *testing.T) {
-	st := NewSignatureTest("sha1:foobar")
-	defer st.Close()
-	st.MakeRequestWithExpectedKey("GET", "", "foobar")
-	testutil.Equal(t, 200, st.rw.Code)
-	testutil.Equal(t, st.rw.Body.String(), "signatures match")
-}
-
-func TestRequestSignaturePostRequest(t *testing.T) {
-	st := NewSignatureTest("sha1:foobar")
-	defer st.Close()
-	payload := `{ "hello": "world!" }`
-	st.MakeRequestWithExpectedKey("POST", payload, "foobar")
-	testutil.Equal(t, 200, st.rw.Code)
-	testutil.Equal(t, st.rw.Body.String(), "signatures match")
 }
 
 func TestHeadersSentToUpstreams(t *testing.T) {
