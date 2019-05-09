@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/kelseyhightower/envconfig"
 
 	log "github.com/buzzfeed/sso/internal/pkg/logging"
 	"github.com/buzzfeed/sso/internal/proxy"
+	"github.com/buzzfeed/sso/internal/proxy/collector"
 )
 
 func init() {
@@ -30,6 +32,12 @@ func main() {
 		logger.Error(err, "error validing options")
 		os.Exit(1)
 	}
+
+	// we setup a runtime collector to emit stats
+	go func() {
+		c := collector.New(opts.StatsdClient, 30*time.Second)
+		c.Run()
+	}()
 
 	ssoProxy, err := proxy.New(opts)
 	if err != nil {

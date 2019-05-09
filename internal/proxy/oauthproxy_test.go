@@ -37,7 +37,7 @@ func init() {
 
 func testValidatorFunc(valid bool) func(*OAuthProxy) error {
 	return func(p *OAuthProxy) error {
-		p.EmailValidator = func(string) bool {
+		p.emailValidator = func(string) bool {
 			return valid
 		}
 		return nil
@@ -46,7 +46,7 @@ func testValidatorFunc(valid bool) func(*OAuthProxy) error {
 
 func setValidator(f func(string) bool) func(*OAuthProxy) error {
 	return func(p *OAuthProxy) error {
-		p.EmailValidator = f
+		p.emailValidator = f
 		return nil
 	}
 }
@@ -76,7 +76,7 @@ func setSkipAuthPreflight(skip bool) func(*OAuthProxy) error {
 func setCookieCipher(a aead.Cipher) func(*OAuthProxy) error {
 	return func(p *OAuthProxy) error {
 		if a != nil {
-			p.CookieCipher = a
+			p.cookieCipher = a
 		}
 		return nil
 	}
@@ -91,7 +91,7 @@ func setProvider(provider providers.Provider) func(*OAuthProxy) error {
 
 func setCookieSecure(cookieSecure bool) func(*OAuthProxy) error {
 	return func(p *OAuthProxy) error {
-		p.CookieSecure = cookieSecure
+		p.cookieSecure = cookieSecure
 		return nil
 	}
 }

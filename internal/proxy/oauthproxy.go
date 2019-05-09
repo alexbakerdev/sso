@@ -19,7 +19,6 @@ import (
 	"github.com/buzzfeed/sso/internal/pkg/aead"
 	log "github.com/buzzfeed/sso/internal/pkg/logging"
 	"github.com/buzzfeed/sso/internal/pkg/sessions"
-	"github.com/buzzfeed/sso/internal/proxy/collector"
 	"github.com/buzzfeed/sso/internal/proxy/providers"
 
 	"github.com/18F/hmacauth"
@@ -49,6 +48,14 @@ var (
 	ErrUserNotAuthorized = errors.New("user not authorized")
 )
 
+type ErrOAuthProxyMisconfigured struct {
+	Missing string
+}
+
+func (e *ErrOAuthProxyMisconfigured) Error() string {
+	return fmt.Sprintf("OAuthProxy is misconfigured: missing required component: %s", e.Missing)
+}
+
 const statusInvalidHost = 421
 
 // EmailValidatorFn function type for validating email addresses.
@@ -56,28 +63,26 @@ type EmailValidatorFn func(string) bool
 
 // OAuthProxy stores all the information associated with proxying the request.
 type OAuthProxy struct {
-	CookieSecure bool
-	CookieCipher aead.Cipher
+	cookieSecure   bool
+	emailValidator EmailValidatorFn
+	redirectURL    *url.URL // the url to receive requests at
+	templates      *template.Template
 
-	EmailValidator EmailValidatorFn
-
-	redirectURL       *url.URL // the url to receive requests at
-	provider          providers.Provider
 	skipAuthPreflight bool
-	templates         *template.Template
-
-	PassAccessToken bool
+	passAccessToken   bool
 
 	StatsdClient *statsd.Client
 
-	csrfStore    sessions.CSRFStore
-	sessionStore sessions.SessionStore
-
-	upstreamConfig *UpstreamConfig
-	handler        http.Handler
-
 	requestSigner   *RequestSigner
 	publicCertsJSON []byte
+
+	// these are required
+	provider       providers.Provider
+	cookieCipher   aead.Cipher
+	upstreamConfig *UpstreamConfig
+	handler        http.Handler
+	csrfStore      sessions.CSRFStore
+	sessionStore   sessions.SessionStore
 }
 
 // SetCookieStore sets the session and csrf stores as a functional option
@@ -99,7 +104,7 @@ func SetCookieStore(opts *Options) func(*OAuthProxy) error {
 
 		op.csrfStore = cookieStore
 		op.sessionStore = cookieStore
-		op.CookieCipher = cookieStore.CookieCipher
+		op.cookieCipher = cookieStore.CookieCipher
 		return nil
 	}
 }
@@ -154,7 +159,7 @@ func SetProxyHandler(handler http.Handler) func(*OAuthProxy) error {
 // SetValidator sets the email validator as a functional option
 func SetValidator(validator func(string) bool) func(*OAuthProxy) error {
 	return func(op *OAuthProxy) error {
-		op.EmailValidator = validator
+		op.emailValidator = validator
 		return nil
 	}
 }
@@ -397,28 +402,54 @@ func generateHmacAuth(signatureKey string) (hmacauth.HmacAuth, error) {
 
 // NewOAuthProxy creates a new OAuthProxy struct.
 func NewOAuthProxy(opts *Options, optFuncs ...func(*OAuthProxy) error) (*OAuthProxy, error) {
-	// we setup a runtime collector to emit stats to datadog
-	go func() {
-		c := collector.New(opts.StatsdClient, 30*time.Second)
-		c.Run()
-	}()
-
 	p := &OAuthProxy{
-		CookieSecure: opts.CookieSecure,
-		StatsdClient: opts.StatsdClient,
+		cookieSecure:   opts.CookieSecure,
+		StatsdClient:   opts.StatsdClient,
+		emailValidator: func(_ string) bool { return true },
 
-		redirectURL:       &url.URL{Path: "/oauth2/callback"},
+		redirectURL: &url.URL{Path: "/oauth2/callback"},
+		templates:   getTemplates(),
+
 		skipAuthPreflight: opts.SkipAuthPreflight,
-		templates:         getTemplates(),
-		PassAccessToken:   opts.PassAccessToken,
-
-		upstreamConfig: &UpstreamConfig{},
+		passAccessToken:   opts.PassAccessToken,
 	}
 
 	for _, optFunc := range optFuncs {
 		err := optFunc(p)
 		if err != nil {
 			return nil, err
+		}
+	}
+
+	// these are required by the oauth proxy
+	if p.provider == nil {
+		return nil, &ErrOAuthProxyMisconfigured{
+			Missing: "Identity Provider",
+		}
+	}
+	if p.cookieCipher == nil {
+		return nil, &ErrOAuthProxyMisconfigured{
+			Missing: "Cookie Cipher",
+		}
+	}
+	if p.upstreamConfig == nil {
+		return nil, &ErrOAuthProxyMisconfigured{
+			Missing: "Upstream Config",
+		}
+	}
+	if p.handler == nil {
+		return nil, &ErrOAuthProxyMisconfigured{
+			Missing: "http.Handler",
+		}
+	}
+	if p.csrfStore == nil {
+		return nil, &ErrOAuthProxyMisconfigured{
+			Missing: "CSRF Store",
+		}
+	}
+	if p.sessionStore == nil {
+		return nil, &ErrOAuthProxyMisconfigured{
+			Missing: "Session Store",
 		}
 	}
 
@@ -440,7 +471,7 @@ func (p *OAuthProxy) Handler() http.Handler {
 	// order as applied here (i.e., we want to validate the host _first_ when
 	// processing a request)
 	var handler http.Handler = mux
-	if p.CookieSecure {
+	if p.cookieSecure {
 		handler = requireHTTPS(handler)
 	}
 	handler = p.setResponseHeaderOverrides(p.upstreamConfig, handler)
@@ -458,7 +489,7 @@ func (p *OAuthProxy) GetRedirectURL(host string) *url.URL {
 
 	// Build redirect URI from request host
 	if u.Scheme == "" {
-		if p.CookieSecure {
+		if p.cookieSecure {
 			u.Scheme = "https"
 		} else {
 			u.Scheme = "http"
@@ -585,7 +616,7 @@ func (p *OAuthProxy) SignOut(rw http.ResponseWriter, req *http.Request) {
 
 	// Build redirect URI from request host
 	if req.URL.Scheme == "" {
-		if p.CookieSecure {
+		if p.cookieSecure {
 			scheme = "https"
 		} else {
 			scheme = "http"
@@ -648,7 +679,7 @@ func (p *OAuthProxy) OAuthStart(rw http.ResponseWriter, req *http.Request, tags 
 
 	// we encrypt this value to be opaque the browser cookie
 	// this value will be unique since we always use a randomized nonce as part of marshaling
-	encryptedCSRF, err := p.CookieCipher.Marshal(state)
+	encryptedCSRF, err := p.cookieCipher.Marshal(state)
 	if err != nil {
 		tags = append(tags, "csrf_token_error")
 		p.StatsdClient.Incr("application_error", tags, 1.0)
@@ -660,7 +691,7 @@ func (p *OAuthProxy) OAuthStart(rw http.ResponseWriter, req *http.Request, tags 
 
 	// we encrypt this value to be opaque the uri query value
 	// this value will be unique since we always use a randomized nonce as part of marshaling
-	encryptedState, err := p.CookieCipher.Marshal(state)
+	encryptedState, err := p.cookieCipher.Marshal(state)
 	if err != nil {
 		tags = append(tags, "error:marshaling_state_parameter")
 		p.StatsdClient.Incr("application_error", tags, 1.0)
@@ -714,7 +745,7 @@ func (p *OAuthProxy) OAuthCallback(rw http.ResponseWriter, req *http.Request) {
 
 	encryptedState := req.Form.Get("state")
 	stateParameter := &StateParameter{}
-	err = p.CookieCipher.Unmarshal(encryptedState, stateParameter)
+	err = p.cookieCipher.Unmarshal(encryptedState, stateParameter)
 	if err != nil {
 		tags = append(tags, "error:state_parameter_error")
 		p.StatsdClient.Incr("application_error", tags, 1.0)
@@ -734,7 +765,7 @@ func (p *OAuthProxy) OAuthCallback(rw http.ResponseWriter, req *http.Request) {
 
 	encryptedCSRF := c.Value
 	csrfParameter := &StateParameter{}
-	err = p.CookieCipher.Unmarshal(encryptedCSRF, csrfParameter)
+	err = p.cookieCipher.Unmarshal(encryptedCSRF, csrfParameter)
 	if err != nil {
 		tags = append(tags, "error:csrf_parameter_error")
 		p.StatsdClient.Incr("application_error", tags, 1.0)
@@ -766,7 +797,7 @@ func (p *OAuthProxy) OAuthCallback(rw http.ResponseWriter, req *http.Request) {
 	// for the resources requested. This can be set via the email address or any groups.
 	//
 	// set cookie, or deny
-	if !p.EmailValidator(session.Email) {
+	if !p.emailValidator(session.Email) {
 		tags = append(tags, "error:invalid_email")
 		p.StatsdClient.Incr("application_error", tags, 1.0)
 		logger.WithRemoteAddress(remoteAddr).WithUser(session.Email).Info(
@@ -969,14 +1000,14 @@ func (p *OAuthProxy) Authenticate(rw http.ResponseWriter, req *http.Request) (er
 		}
 	}
 
-	if !p.EmailValidator(session.Email) {
+	if !p.emailValidator(session.Email) {
 		logger.WithUser(session.Email).Error("not authorized")
 		return ErrUserNotAuthorized
 	}
 
 	req.Header.Set("X-Forwarded-User", session.User)
 
-	if p.PassAccessToken && session.AccessToken != "" {
+	if p.passAccessToken && session.AccessToken != "" {
 		req.Header.Set("X-Forwarded-Access-Token", session.AccessToken)
 	}
 
