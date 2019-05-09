@@ -1677,3 +1677,255 @@ func TestHTTPSRedirect(t *testing.T) {
 		})
 	}
 }
+
+func TestTimeoutHandler(t *testing.T) {
+	testCases := []struct {
+		name               string
+		config             *UpstreamConfig
+		globalTimeout      time.Duration
+		ExpectedStatusCode int
+		ExpectedBody       string
+		ExpectedErr        error
+	}{
+		{
+			name: "does not timeout",
+			config: &UpstreamConfig{
+				Timeout: time.Duration(100) * time.Millisecond,
+			},
+			globalTimeout:      time.Duration(100) * time.Millisecond,
+			ExpectedStatusCode: 200,
+			ExpectedBody:       "OK",
+		},
+		{
+			name: "times out using upstream config timeout",
+			config: &UpstreamConfig{
+				Service: "service-test",
+				Timeout: time.Duration(10) * time.Millisecond,
+			},
+			globalTimeout:      time.Duration(100) * time.Millisecond,
+			ExpectedStatusCode: 503,
+			ExpectedBody:       fmt.Sprintf("service-test failed to respond within the 10ms timeout period"),
+		},
+		{
+			name: "times out using global write timeout",
+			config: &UpstreamConfig{
+				Service: "service-test",
+				Timeout: time.Duration(100) * time.Millisecond,
+			},
+			globalTimeout: time.Duration(10) * time.Millisecond,
+			ExpectedErr: &url.Error{
+				Err: io.EOF,
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			baseHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				timer := time.NewTimer(time.Duration(50) * time.Millisecond)
+				<-timer.C
+				w.Write([]byte("OK"))
+			})
+			timeoutHandler := NewTimeoutHandler(baseHandler, tc.config)
+
+			srv := httptest.NewUnstartedServer(timeoutHandler)
+			srv.Config.WriteTimeout = tc.globalTimeout
+			srv.Start()
+			defer srv.Close()
+
+			res, err := http.Get(srv.URL)
+			if err != nil {
+				if tc.ExpectedErr == nil {
+					t.Fatalf("got unexpected err=%v", err)
+				}
+				urlErr, ok := err.(*url.Error)
+				if !ok {
+					t.Fatalf("got unexpected err=%v", err)
+				}
+				if urlErr.Err != io.EOF {
+					t.Fatalf("got unexpected err=%v", err)
+				}
+				// We got the error we expected, exit
+				return
+			}
+
+			if res.StatusCode != tc.ExpectedStatusCode {
+				t.Errorf(" got=%v", res.StatusCode)
+				t.Errorf("want=%v", tc.ExpectedStatusCode)
+				t.Fatalf("got unexpcted status code")
+			}
+
+			body, err := ioutil.ReadAll(res.Body)
+			if err != nil {
+				t.Fatalf("got unexpected err=%q", err)
+			}
+
+			if string(body) != tc.ExpectedBody {
+				t.Errorf(" got=%q", body)
+				t.Errorf("want=%q", tc.ExpectedBody)
+				t.Fatalf("got unexpcted body")
+			}
+		})
+	}
+}
+
+func generateTestRewriteUpstreamConfigs(fromRegex, toTemplate string) []*UpstreamConfig {
+	templateVars := map[string]string{
+		"root_domain": "dev",
+		"cluster":     "sso",
+	}
+	defaultUpstreamOpts := &OptionsConfig{Timeout: time.Duration(1) * time.Second}
+	upstreamConfigs, err := loadServiceConfigs([]byte(fmt.Sprintf(`
+- service: foo
+  default:
+    from: %s
+    to: %s
+    type: rewrite
+`, fromRegex, toTemplate)), "sso", "http", templateVars, defaultUpstreamOpts)
+	if err != nil {
+		panic(err)
+	}
+	return upstreamConfigs
+}
+
+func TestRewriteRoutingHandling(t *testing.T) {
+	type response struct {
+		Host           string `json:"host"`
+		XForwardedHost string `json:"x-forwarded-host"`
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		body, err := json.Marshal(
+			&response{
+				Host:           r.Host,
+				XForwardedHost: r.Header.Get("X-Forwarded-Host"),
+			},
+		)
+		if err != nil {
+			t.Fatalf("expected to marshal json: %s", err)
+		}
+		rw.Write(body)
+	}))
+	defer upstream.Close()
+
+	parsedUpstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("expected to parse upstream URL err:%q", err)
+	}
+
+	upstreamHost, upstreamPort, err := net.SplitHostPort(parsedUpstreamURL.Host)
+	if err != nil {
+		t.Fatalf("expected to split host/hort err:%q", err)
+	}
+
+	testCases := []struct {
+		Name             string
+		Session          *sessions.SessionState
+		TestHost         string
+		FromRegex        string
+		ToTemplate       string
+		ExpectedCode     int
+		ExpectedResponse *response
+	}{
+		{
+			Name:     "everything should work in the normal case",
+			TestHost: "foo.sso.dev",
+			Session: &sessions.SessionState{
+				LifetimeDeadline: time.Now().Add(time.Duration(1) * time.Hour),
+				RefreshDeadline:  time.Now().Add(time.Duration(1) * time.Hour),
+				ValidDeadline:    time.Now().Add(time.Duration(1) * time.Hour),
+			},
+			FromRegex:    "(.*)",
+			ToTemplate:   parsedUpstreamURL.Host,
+			ExpectedCode: http.StatusOK,
+			ExpectedResponse: &response{
+				Host:           parsedUpstreamURL.Host,
+				XForwardedHost: "foo.sso.dev",
+			},
+		},
+		{
+			Name:     "it should not match a non-matching regex",
+			TestHost: "foo.sso.dev",
+			Session: &sessions.SessionState{
+				LifetimeDeadline: time.Now().Add(time.Duration(1) * time.Hour),
+				RefreshDeadline:  time.Now().Add(time.Duration(1) * time.Hour),
+				ValidDeadline:    time.Now().Add(time.Duration(1) * time.Hour),
+			},
+			FromRegex:    "bar",
+			ToTemplate:   parsedUpstreamURL.Host,
+			ExpectedCode: statusInvalidHost,
+		},
+		{
+			Name:     "it should match and replace using regex/template to find port in embeded domain",
+			TestHost: fmt.Sprintf("somedomain--%s", upstreamPort),
+			Session: &sessions.SessionState{
+				LifetimeDeadline: time.Now().Add(time.Duration(1) * time.Hour),
+				RefreshDeadline:  time.Now().Add(time.Duration(1) * time.Hour),
+				ValidDeadline:    time.Now().Add(time.Duration(1) * time.Hour),
+			},
+			FromRegex:    "somedomain--(.*)",                 // capture port
+			ToTemplate:   fmt.Sprintf("%s:$1", upstreamHost), // add port to dest
+			ExpectedCode: http.StatusOK,
+			ExpectedResponse: &response{
+				Host:           parsedUpstreamURL.Host,
+				XForwardedHost: fmt.Sprintf("somedomain--%s", upstreamPort),
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			opts := NewOptions()
+			opts.SkipAuthPreflight = true
+			opts.CookieSecret = testEncodedCookieSecret
+			opts.CookieExpire = time.Duration(72) * time.Hour
+			opts.ClientID = "client ID"
+			opts.ClientSecret = "client secret"
+			opts.ProviderURLString = "https://auth.sso.dev"
+			opts.upstreamConfigs = generateTestRewriteUpstreamConfigs(tc.FromRegex, tc.ToTemplate)
+			opts.Validate()
+			proxy, err := NewOAuthProxy(opts, testValidatorFunc(true), setSessionStore(&sessions.MockSessionStore{Session: tc.Session}))
+			if err != nil {
+				t.Fatalf("unexpected err provisioning oauth proxy err:%q", err)
+			}
+
+			req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/", tc.TestHost), strings.NewReader(""))
+			if err != nil {
+				t.Fatalf("unexpected err creating request err:%s", err)
+			}
+
+			rw := httptest.NewRecorder()
+
+			proxy.Handler().ServeHTTP(rw, req)
+
+			if tc.ExpectedCode != rw.Code {
+				t.Errorf("expected code %d, got %d", tc.ExpectedCode, rw.Code)
+			}
+
+			if tc.ExpectedResponse == nil {
+				// we've passed our test, we didn't expect a body, exit early
+				return
+			}
+
+			body, err := ioutil.ReadAll(rw.Body)
+			if err != nil {
+				t.Fatalf("expected to read body: %s", err)
+			}
+
+			got := &response{}
+			err = json.Unmarshal(body, got)
+			if err != nil {
+				t.Fatalf("expected to decode json: %s", err)
+			}
+
+			if !reflect.DeepEqual(tc.ExpectedResponse, got) {
+				t.Logf(" got host: %v", got.Host)
+				t.Logf("want host: %v", tc.ExpectedResponse.Host)
+
+				t.Logf(" got X-Forwarded-Host: %v", got.XForwardedHost)
+				t.Logf("want X-Forwarded-Host: %v", tc.ExpectedResponse.XForwardedHost)
+
+				t.Errorf("got unexpected response for Host or X-Forwarded-Host header")
+			}
+		})
+	}
+}
