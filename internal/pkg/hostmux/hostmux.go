@@ -93,20 +93,18 @@ func (r *Router) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 // then the default route
 func (r *Router) Route(req *http.Request) Route {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	sr, ok := r.StaticRoutes[req.Host]
-	r.mu.Unlock()
 	if ok {
 		return sr
 	}
 
-	r.mu.Lock()
 	for _, rr := range r.RegexpRoutes {
 		if rr.regexp.MatchString(req.Host) {
-			r.mu.Unlock()
 			return rr
 		}
 	}
-	r.mu.Unlock()
 
 	// Nothing matched, use default route
 	return r.DefaultRoute
