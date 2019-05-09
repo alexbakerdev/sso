@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1768,25 +1769,6 @@ func TestTimeoutHandler(t *testing.T) {
 	}
 }
 
-func generateTestRewriteUpstreamConfigs(fromRegex, toTemplate string) []*UpstreamConfig {
-	templateVars := map[string]string{
-		"root_domain": "dev",
-		"cluster":     "sso",
-	}
-	defaultUpstreamOpts := &OptionsConfig{Timeout: time.Duration(1) * time.Second}
-	upstreamConfigs, err := loadServiceConfigs([]byte(fmt.Sprintf(`
-- service: foo
-  default:
-    from: %s
-    to: %s
-    type: rewrite
-`, fromRegex, toTemplate)), "sso", "http", templateVars, defaultUpstreamOpts)
-	if err != nil {
-		panic(err)
-	}
-	return upstreamConfigs
-}
-
 func TestRewriteRoutingHandling(t *testing.T) {
 	type response struct {
 		Host           string `json:"host"`
@@ -1819,51 +1801,37 @@ func TestRewriteRoutingHandling(t *testing.T) {
 
 	testCases := []struct {
 		Name             string
-		Session          *sessions.SessionState
 		TestHost         string
-		FromRegex        string
-		ToTemplate       string
+		RewriteRoute     *RewriteRoute
 		ExpectedCode     int
 		ExpectedResponse *response
 	}{
 		{
 			Name:     "everything should work in the normal case",
-			TestHost: "foo.sso.dev",
-			Session: &sessions.SessionState{
-				LifetimeDeadline: time.Now().Add(time.Duration(1) * time.Hour),
-				RefreshDeadline:  time.Now().Add(time.Duration(1) * time.Hour),
-				ValidDeadline:    time.Now().Add(time.Duration(1) * time.Hour),
+			TestHost: "localhost",
+			RewriteRoute: &RewriteRoute{
+				FromRegex: regexp.MustCompile("(.*)"),
+				ToTemplate: &url.URL{
+					Scheme: parsedUpstreamURL.Scheme,
+					Opaque: parsedUpstreamURL.Host,
+				},
 			},
-			FromRegex:    "(.*)",
-			ToTemplate:   parsedUpstreamURL.Host,
 			ExpectedCode: http.StatusOK,
 			ExpectedResponse: &response{
 				Host:           parsedUpstreamURL.Host,
-				XForwardedHost: "foo.sso.dev",
+				XForwardedHost: "localhost",
 			},
-		},
-		{
-			Name:     "it should not match a non-matching regex",
-			TestHost: "foo.sso.dev",
-			Session: &sessions.SessionState{
-				LifetimeDeadline: time.Now().Add(time.Duration(1) * time.Hour),
-				RefreshDeadline:  time.Now().Add(time.Duration(1) * time.Hour),
-				ValidDeadline:    time.Now().Add(time.Duration(1) * time.Hour),
-			},
-			FromRegex:    "bar",
-			ToTemplate:   parsedUpstreamURL.Host,
-			ExpectedCode: statusInvalidHost,
 		},
 		{
 			Name:     "it should match and replace using regex/template to find port in embeded domain",
 			TestHost: fmt.Sprintf("somedomain--%s", upstreamPort),
-			Session: &sessions.SessionState{
-				LifetimeDeadline: time.Now().Add(time.Duration(1) * time.Hour),
-				RefreshDeadline:  time.Now().Add(time.Duration(1) * time.Hour),
-				ValidDeadline:    time.Now().Add(time.Duration(1) * time.Hour),
+			RewriteRoute: &RewriteRoute{
+				FromRegex: regexp.MustCompile("somedomain--(.*)"),
+				ToTemplate: &url.URL{
+					Scheme: "http",
+					Opaque: fmt.Sprintf("%s:$1", upstreamHost), // add port to dest
+				},
 			},
-			FromRegex:    "somedomain--(.*)",                 // capture port
-			ToTemplate:   fmt.Sprintf("%s:$1", upstreamHost), // add port to dest
 			ExpectedCode: http.StatusOK,
 			ExpectedResponse: &response{
 				Host:           parsedUpstreamURL.Host,
@@ -1875,24 +1843,24 @@ func TestRewriteRoutingHandling(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.Name, func(t *testing.T) {
 			opts := NewOptions()
-			opts.SkipAuthPreflight = true
-			opts.CookieSecret = testEncodedCookieSecret
-			opts.CookieExpire = time.Duration(72) * time.Hour
-			opts.ClientID = "client ID"
-			opts.ClientSecret = "client secret"
-			opts.ProviderURLString = "https://auth.sso.dev"
-			opts.upstreamConfigs = generateTestRewriteUpstreamConfigs(tc.FromRegex, tc.ToTemplate)
-			opts.Validate()
-			proxy, err := NewOAuthProxy(opts, testValidatorFunc(true), setSessionStore(&sessions.MockSessionStore{Session: tc.Session}))
-			if err != nil {
-				t.Fatalf("unexpected err provisioning oauth proxy err:%q", err)
+
+			upstreamConfig := &UpstreamConfig{
+				Route: tc.RewriteRoute,
 			}
 
-			req, err := http.NewRequest("GET", fmt.Sprintf("https://%s/", tc.TestHost), strings.NewReader(""))
-			if err != nil {
-				t.Fatalf("unexpected err creating request err:%s", err)
-			}
+			reverseProxy := NewRewriteReverseProxy(tc.RewriteRoute, upstreamConfig)
+			handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, nil)
 
+			proxy, close := testNewOAuthProxy(t,
+				SetUpstreamConfig(upstreamConfig),
+				SetProxyHandler(handler),
+			)
+			defer close()
+
+			requestURL := fmt.Sprintf("https://%s/", tc.TestHost)
+			t.Logf("requestURL: %v", requestURL)
+
+			req := httptest.NewRequest("GET", requestURL, nil)
 			rw := httptest.NewRecorder()
 
 			proxy.Handler().ServeHTTP(rw, req)
