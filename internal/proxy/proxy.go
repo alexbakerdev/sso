@@ -47,6 +47,7 @@ func New(opts *Options) (*SSOProxy, error) {
 		handler := NewReverseProxyHandler(reverseProxy, opts, upstreamConfig, requestSigner)
 
 		optFuncs = append(optFuncs,
+			SetProvider(opts.provider),
 			SetCookieStore(opts),
 			SetUpstreamConfig(upstreamConfig),
 			SetProxyHandler(handler),

@@ -82,13 +82,6 @@ func setCookieCipher(a aead.Cipher) func(*OAuthProxy) error {
 	}
 }
 
-func setProvider(provider providers.Provider) func(*OAuthProxy) error {
-	return func(p *OAuthProxy) error {
-		p.provider = provider
-		return nil
-	}
-}
-
 func setCookieSecure(cookieSecure bool) func(*OAuthProxy) error {
 	return func(p *OAuthProxy) error {
 		p.cookieSecure = cookieSecure
@@ -158,7 +151,7 @@ func testNewOAuthProxy(t *testing.T, optFuncs ...func(*OAuthProxy) error) (*OAut
 
 	standardOptFuncs := []func(*OAuthProxy) error{
 		testValidatorFunc(true),
-		setProvider(provider),
+		SetProvider(provider),
 		setSessionStore(&sessions.MockSessionStore{Session: testSession()}),
 		SetUpstreamConfig(upstreamConfig),
 		SetProxyHandler(handler),
@@ -720,7 +713,7 @@ func TestAuthOnlyEndpoint(t *testing.T) {
 			proxy, close := testNewOAuthProxy(t,
 				setSessionStore(tc.sessionStore),
 				setValidator(func(_ string) bool { return tc.validEmail }),
-				setProvider(&providers.TestProvider{
+				SetProvider(&providers.TestProvider{
 					RefreshSessionFunc:  func(*sessions.SessionState, []string) (bool, error) { return true, nil },
 					ValidateSessionFunc: func(*sessions.SessionState, []string) bool { return true },
 				}),
@@ -1128,7 +1121,7 @@ func TestAuthenticate(t *testing.T) {
 			}
 
 			proxy, close := testNewOAuthProxy(t,
-				setProvider(provider),
+				SetProvider(provider),
 				setSessionStore(tc.SessionStore),
 			)
 			defer close()

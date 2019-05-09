@@ -164,6 +164,14 @@ func SetValidator(validator func(string) bool) func(*OAuthProxy) error {
 	}
 }
 
+// SetProvider sets the provider as a functional option
+func SetProvider(provider providers.Provider) func(*OAuthProxy) error {
+	return func(op *OAuthProxy) error {
+		op.provider = provider
+		return nil
+	}
+}
+
 type route struct {
 	upstreamConfig *UpstreamConfig
 	handler        http.Handler
