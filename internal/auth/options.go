@@ -29,21 +29,15 @@ import (
 // ProxyRootDomains - []string - only redirect to specified proxy domains (may be given multiple times)
 // GoogleAdminEmail - string - the google admin to impersonate for api calls
 // GoogleServiceAccountJSON - string - the path to the service account json credentials
-// Footer - string custom footer string. Use \"-\" to disable default footer.
 // CookieSecret - string - the seed string for secure cookies (optionally base64 encoded)
 // CookieDomain - string - an optional cookie domain to force cookies to (ie: .yourcompany.com)*
 // CookieExpire - duration - expire timeframe for cookie, defaults at 168 hours
 // CookieRefresh - duration - refresh the cookie after this duration default 0
 // CookieSecure - bool - set secure (HTTPS) cookie flag
 // CookieHTTPOnly - bool - set httponly cookie flag
-// RequestTimeout - duration - overall request timeout
 // AuthCodeSecret - string - the seed string for secure auth codes (optionally base64 encoded)
 // GroupCacheProviderTTL - time.Duration - cache TTL for the group-cache provider used for on-demand group caching
 // GroupsCacheRefreshTTL - time.Duratoin - cache TTL for the groups fillcache mechanism used to preemptively fill group caches
-// PassHostHeader - bool - pass the request Host Header to upstream (default true)
-// SkipProviderButton - bool - if true, will skip sign-in-page to directly reach the next step: oauth/start
-// PassUserHeaders - bool (default true) - pass X-Forwarded-User and X-Forwarded-Email information to upstream
-// SetXAuthRequest - set X-Auth-Request-User and X-Auth-Request-Email response headers (useful in Nginx auth_request mode)
 // Provider - provider name
 // ProviderServerID - string - if using Okta as the provider, the authorisation server ID (defaults to 'default')
 // SignInURL - provider sign in endpoint
@@ -75,8 +69,6 @@ type Options struct {
 
 	OrgURL string `envconfig:"OKTA_ORG_URL"`
 
-	Footer string `envconfig:"FOOTER"`
-
 	CookieName     string
 	CookieSecret   string        `envconfig:"COOKIE_SECRET"`
 	CookieDomain   string        `envconfig:"COOKIE_DOMAIN"`
@@ -85,7 +77,6 @@ type Options struct {
 	CookieSecure   bool          `envconfig:"COOKIE_SECURE" default:"true"`
 	CookieHTTPOnly bool          `envconfig:"COOKIE_HTTP_ONLY" default:"true"`
 
-	RequestTimeout  time.Duration `envconfig:"REQUEST_TIMEOUT" default:"2s"`
 	TCPWriteTimeout time.Duration `envconfig:"TCP_WRITE_TIMEOUT" default:"30s"`
 	TCPReadTimeout  time.Duration `envconfig:"TCP_READ_TIMEOUT" default:"30s"`
 
@@ -94,11 +85,6 @@ type Options struct {
 	GroupCacheProviderTTL time.Duration `envconfig:"GROUP_CACHE_PROVIDER_TTL" default:"10m"`
 	GroupsCacheRefreshTTL time.Duration `envconfig:"GROUPS_CACHE_REFRESH_TTL" default:"10m"`
 	SessionLifetimeTTL    time.Duration `envconfig:"SESSION_LIFETIME_TTL" default:"720h"`
-
-	PassHostHeader     bool `envconfig:"PASS_HOST_HEADER" default:"true"`
-	SkipProviderButton bool `envconfig:"SKIP_PROVIDER_BUTTON"`
-	PassUserHeaders    bool `envconfig:"PASS_USER_HEADERS" default:"true"`
-	SetXAuthRequest    bool `envconfig:"SET_XAUTHREQUEST" default:"false"`
 
 	// These options allow for other providers besides Google, with potential overrides.
 	Provider         string `envconfig:"PROVIDER" default:"google"`
@@ -132,17 +118,14 @@ type SignatureData struct {
 // NewOptions returns new options
 func NewOptions() *Options {
 	return &Options{
-		Port:            4180,
-		CookieName:      "_sso_auth",
-		CookieSecure:    true,
-		CookieHTTPOnly:  true,
-		CookieExpire:    time.Duration(168) * time.Hour,
-		CookieRefresh:   time.Duration(0),
-		SetXAuthRequest: false,
-		PassUserHeaders: true,
-		PassHostHeader:  true,
-		ApprovalPrompt:  "force",
-		RequestLogging:  true,
+		Port:           4180,
+		CookieName:     "_sso_auth",
+		CookieSecure:   true,
+		CookieHTTPOnly: true,
+		CookieExpire:   time.Duration(168) * time.Hour,
+		CookieRefresh:  time.Duration(0),
+		ApprovalPrompt: "force",
+		RequestLogging: true,
 	}
 }
 
