@@ -11,7 +11,7 @@ import (
 )
 
 func testOptions() *Options {
-	o := NewOptions()
+	o, _ := NewOptions()
 	o.CookieSecret = "foobar"
 	o.ClientID = "bazquux"
 	o.ClientSecret = "xyzzyplugh"
@@ -35,7 +35,7 @@ func errorMsg(msgs []string) string {
 }
 
 func TestNewOptions(t *testing.T) {
-	o := NewOptions()
+	o, _ := NewOptions()
 	o.EmailDomains = []string{"*"}
 	err := o.Validate()
 	testutil.NotEqual(t, nil, err)

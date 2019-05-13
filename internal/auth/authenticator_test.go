@@ -71,7 +71,7 @@ var testEncodedCookieSecret = "x7xzsM1Ky4vGQPwqy6uTztfr3jtm/pIdRbJXgE0q8kU="
 var testAuthCodeSecret = "qICChm3wdjbjcWymm7PefwtPP6/PZv+udkFEubTeE38="
 
 func testOpts(proxyClientID, proxyClientSecret string) *Options {
-	opts := NewOptions()
+	opts, _ := NewOptions()
 	opts.ProxyClientID = proxyClientID
 	opts.ProxyClientSecret = proxyClientSecret
 	opts.CookieSecret = testEncodedCookieSecret

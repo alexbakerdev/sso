@@ -64,7 +64,7 @@ func TestNewStatsd(t *testing.T) {
 				t.Fatalf("error %s", err.Error())
 			}
 			defer pc.Close()
-			opts := NewOptions()
+			opts, _ := NewOptions()
 			opts.Validate()
 			client, err := newStatsdClient(tc.host, tc.port)
 			if err != nil {
@@ -161,7 +161,7 @@ func TestLogRequestMetrics(t *testing.T) {
 				t.Fatalf("error %s", err.Error())
 			}
 			defer pc.Close()
-			opts := NewOptions()
+			opts, _ := NewOptions()
 			opts.Validate()
 
 			client, _, _ := newTestStatsdClient(t)

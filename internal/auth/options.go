@@ -200,10 +200,10 @@ func setDefaults() {
 		"pass_host_header":         true,
 		"pass_user_headers":        true,
 		"set_xauthrequest":         false,
-		"provider":                 "google",
-		"provider_server_id":       "default",
-		"approval_prompt":          "force",
-		"request_logging":          true,
+		//"provider":                 "google",
+		"provider_server_id": "default",
+		"approval_prompt":    "force",
+		"request_logging":    true,
 	}
 	for k, v := range defaultVars {
 		viper.SetDefault(k, v)
