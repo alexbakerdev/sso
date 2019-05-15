@@ -77,7 +77,7 @@ type Options struct {
 
 	Footer string `envconfig:"FOOTER"`
 
-	CookieName     string
+	CookieName     string        `envconfig:"COOKIE_NAME" default:"_sso_proxy"`
 	CookieSecret   string        `envconfig:"COOKIE_SECRET"`
 	CookieDomain   string        `envconfig:"COOKIE_DOMAIN"`
 	CookieExpire   time.Duration `envconfig:"COOKIE_EXPIRE" default:"168h"`
